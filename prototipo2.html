@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vía Cero - Control y Certificación</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; background: #0f172a; color: #f8fafc; padding: 16px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+    h1 { font-size: 1.2rem; margin: 0 0 4px; color: #38bdf8; }
+    p.sub { margin: 0; font-size: 0.85rem; color: #94a3b8; }
+    #map { height: 320px; width: 100%; border-radius: 10px; border: 1px solid #334155; margin-top: 10px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
+    .stat { background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; }
+    .stat span { display: block; font-size: 0.75rem; color: #94a3b8; }
+    .stat strong { font-size: 1.15rem; color: #f8fafc; }
+    select, textarea { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; margin-top: 6px; }
+    button { padding: 10px 14px; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; margin-top: 8px; }
+    .btn-primary { background: #10b981; color: #052e16; }
+    .btn-sec { background: #3b82f6; color: #fff; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .cert { background: #f8fafc; color: #0f172a; border-radius: 10px; padding: 16px; margin-top: 12px; border-left: 6px solid #10b981; display: none; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #334155; }
+    th { color: #94a3b8; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h1>VÍA CERO — Centro de Control y Certificación</h1>
+    <p class="sub">Monitoreo satelital en tiempo real y Score de Manejo Seguro • Yumbo, Valle del Cauca</p>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+      <strong>Mapa Operativo en Vivo (Yumbo)</strong>
+      <select id="truckFilter" style="width:auto; margin:0;">
+        <option value="ALL">Todos los camiones activos</option>
+      </select>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <div class="card">
+    <strong>Evaluación Automática de Conducción Segura</strong>
+    <div class="grid">
+      <div class="stat"><span>Camión Seleccionado</span><strong id="mTruck">Sin datos</strong></div>
+      <div class="stat"><span>Score Manejo Seguro</span><strong id="mScore">-- / 100</strong></div>
+      <div class="stat"><span>Velocidad Actual</span><strong id="mSpeed">--</strong></div>
+      <div class="stat"><span>Eventos Críticos</span><strong id="mAlerts">0</strong></div>
+    </div>
+    <button id="btnCert" class="btn-primary">Generar Certificado Vía Cero</button>
+    <button id="btnClear" class="btn-danger">Limpiar Registros</button>
+
+    <div id="certBox" class="cert"></div>
+  </div>
+
+  <div class="card">
+    <strong>Ingesta Externa (Pegar JSON desde celular/API)</strong>
+    <textarea id="jsonInput" rows="3" placeholder='Pega aquí la trama JSON generada en index.html...'></textarea>
+    <button id="btnIngest" class="btn-sec">Procesar Trama JSON</button>
+  </div>
+
+  <div class="card">
+    <strong>Bitácora Cronológica (Ordenada por event_timestamp)</strong>
+    <table>
+      <thead>
+        <tr>
+          <th>Hora Evento</th>
+          <th>Camión</th>
+          <th>Corredor</th>
+          <th>Vel.</th>
+          <th>Estado</th>
+        </tr>
+      </thead>
+      <tbody id="logBody">
+        <tr><td colspan="5">Sin registros reales recibidos aún.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([3.5823, -76.4915], 13); // Yumbo, Valle del Cauca
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    const markers = {};
+    const polylines = {};
+    const channel = new BroadcastChannel('via_cero_stream');
+
+    function getEvents() {
+      const raw = JSON.parse(localStorage.getItem('via_cero_events') || '[]');
+      // Deduplicar por event_id y ordenar cronológicamente por event_timestamp
+      const unique = Array.from(new Map(raw.map(e => [e.event_id, e])).values());
+      return unique.sort((a, b) => new Date(a.event_timestamp) - new Date(b.event_timestamp));
+    }
+
+    function calculateScore(events) {
+      let score = 100;
+      let alerts = 0;
+      events.forEach(e => {
+        if (e.overspeed) { score -= 5; alerts++; }
+        if (e.harsh_braking) { score -= 4; alerts++; }
+        if (e.fatigue_alert) { score -= 6; alerts++; }
+      });
+      return { score: Math.max(0, score), alerts };
+    }
+
+    function render() {
+      const events = getEvents();
+      const filter = document.getElementById('truckFilter');
+      const currentVal = filter.value;
+      const trucks = [...new Set(events.map(e => e.vehicle_id))];
+
+      filter.innerHTML = '<option value="ALL">Todos los camiones activos</option>' +
+        trucks.map(t => `<option value="${t}">${t}</option>`).join('');
+      if (trucks.includes(currentVal)) filter.value = currentVal;
+
+      const selectedTruck = filter.value === 'ALL' ? trucks[0] : filter.value;
+      const filtered = selectedTruck ? events.filter(e => e.vehicle_id === selectedTruck) : [];
+
+      // Actualizar mapa por cada camión
+      trucks.forEach(t => {
+        const tEvents = events.filter(e => e.vehicle_id === t);
+        const coords = tEvents.map(e => [e.lat, e.lng]);
+        const last = tEvents[tEvents.length - 1];
+
+        if (!markers[t]) {
+          markers[t] = L.marker([last.lat, last.lng]).addTo(map);
+          polylines[t] = L.polyline(coords, { color: '#38bdf8', weight: 4 }).addTo(map);
+        } else {
+          markers[t].setLatLng([last.lat, last.lng]);
+          polylines[t].setLatLngs(coords);
+        }
+        markers[t].bindPopup(`<b>${t}</b> (${last.company})<br>Corredor: ${last.corridor}<br>Vel: ${last.speed_kmh} km/h`);
+      });
+
+      if (filtered.length > 0) {
+        const last = filtered[filtered.length - 1];
+        const { score, alerts } = calculateScore(filtered);
+        document.getElementById('mTruck').textContent = `${last.vehicle_id} (${last.company})`;
+        document.getElementById('mScore').textContent = `${score} / 100`;
+        document.getElementById('mSpeed').textContent = `${last.speed_kmh} km/h`;
+        document.getElementById('mAlerts').textContent = alerts;
+        map.panTo([last.lat, last.lng]);
+      } else {
+        document.getElementById('mTruck').textContent = 'Sin datos';
+        document.getElementById('mScore').textContent = '-- / 100';
+        document.getElementById('mSpeed').textContent = '--';
+        document.getElementById('mAlerts').textContent = '0';
+      }
+
+      const tbody = document.getElementById('logBody');
+      if (events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5">Sin registros reales recibidos aún.</td></tr>';
+      } else {
+        tbody.innerHTML = [...events].reverse().slice(0, 15).map(e => {
+          const flags = [
+            e.overspeed ? 'Exceso vel.' : '',
+            e.harsh_braking ? 'Frenada brusca' : '',
+            e.fatigue_alert ? 'Fatiga' : ''
+          ].filter(Boolean).join(', ') || 'Conducción segura';
+          return `<tr>
+            <td>${new Date(e.event_timestamp).toLocaleTimeString()}</td>
+            <td>${e.vehicle_id}</td>
+            <td>${e.corridor}</td>
+            <td>${e.speed_kmh} km/h</td>
+            <td>${flags}</td>
+          </tr>`;
+        }).join('');
+      }
+    }
+
+    channel.onmessage = () => render();
+    window.addEventListener('storage', () => render());
+    document.getElementById('truckFilter').addEventListener('change', render);
+
+    document.getElementById('btnIngest').addEventListener('click', () => {
+      try {
+        const obj = JSON.parse(document.getElementById('jsonInput').value);
+        if (!obj.vehicle_id || typeof obj.lat !== 'number' || typeof obj.lng !== 'number') {
+          throw new Error('Faltan campos obligatorios (vehicle_id, lat, lng).');
+        }
+        if (!obj.event_id) obj.event_id = `${obj.vehicle_id}-${Date.now()}`;
+        if (!obj.event_timestamp) obj.event_timestamp = new Date().toISOString();
+        const list = getEvents();
+        list.push(obj);
+        localStorage.setItem('via_cero_events', JSON.stringify(list));
+        document.getElementById('jsonInput').value = '';
+        render();
+      } catch (err) {
+        alert('JSON inválido: ' + err.message);
+      }
+    });
+
+    document.getElementById('btnCert').addEventListener('click', () => {
+      const events = getEvents();
+      const filterVal = document.getElementById('truckFilter').value;
+      const truck = filterVal === 'ALL' ? events[0]?.vehicle_id : filterVal;
+      if (!truck) {
+        alert('No hay datos reales de ningún camión para certificar.');
+        return;
+      }
+      const tEvents = events.filter(e => e.vehicle_id === truck);
+      const { score } = calculateScore(tEvents);
+      const last = tEvents[tEvents.length - 1];
+      const box = document.getElementById('certBox');
+      box.style.display = 'block';
+
+      if (score >= 85) {
+        box.style.borderLeftColor = '#10b981';
+        box.innerHTML = `
+          <strong>CERTIFICADO VÍA CERO — CONDUCCIÓN DE CARGA SEGURA</strong><br>
+          Vehículo: <b>${last.vehicle_id}</b> | Empresa: <b>${last.company}</b><br>
+          Score Obtenido: <b>${score}/100</b> (Aprobado ≥ 85)<br>
+          Registros Auditados: ${tEvents.length} tramas telemáticas en Yumbo<br>
+          Estado: <b>HABILITADO PARA INCENTIVOS MOVILIDAD YUMBO</b><br>
+          Fecha emisión: ${new Date().toLocaleString()}
+        `;
+      } else {
+        box.style.borderLeftColor = '#ef4444';
+        box.innerHTML = `
+          <strong>CERTIFICACIÓN NO APROBADA</strong><br>
+          Vehículo: <b>${last.vehicle_id}</b> | Score Obtenido: <b>${score}/100</b> (Mínimo requerido: 85)<br>
+          Motivo: Superó el límite de eventos de riesgo registrados en el recorrido.
+        `;
+      }
+    });
+
+    document.getElementById('btnClear').addEventListener('click', () => {
+      localStorage.removeItem('via_cero_events');
+      document.getElementById('certBox').style.display = 'none';
+      Object.values(markers).forEach(m => map.removeLayer(m));
+      Object.values(polylines).forEach(p => map.removeLayer(p));
+      for (const k in markers) delete markers[k];
+      for (const k in polylines) delete polylines[k];
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
